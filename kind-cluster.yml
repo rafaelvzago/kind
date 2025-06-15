@@ -1,0 +1,82 @@
+---
+- name: Manage Kind Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+    - name: Set variables
+      set_fact:
+        kind_executable: /usr/local/sbin/kind
+        kubectl_executable: /usr/local/sbin/kubectl
+        cluster_name: dev-cluster
+
+    - name: Create, recreate, or delete the cluster
+      tags: [create, recreate, delete]
+      block:
+        - name: Tasks for creating the cluster
+          tags: [create, recreate]
+          block:
+            - name: Check if kind is installed
+              stat:
+                path: "{{ kind_executable }}"
+              register: kind_stat
+
+            - name: Download and install Kind
+              when: not kind_stat.stat.exists
+              become: yes
+              get_url:
+                url: "https://kind.sigs.k8s.io/dl/v0.11.1/kind-linux-amd64"
+                dest: "{{ kind_executable }}"
+                mode: '0755'
+
+            - name: Check if kubectl is installed
+              stat:
+                path: "{{ kubectl_executable }}"
+              register: kubectl_stat
+
+            - name: Download and install kubectl
+              when: not kubectl_stat.stat.exists
+              become: yes
+              get_url:
+                url: "https://dl.k8s.io/release/v1.23.6/bin/linux/amd64/kubectl"
+                dest: "{{ kubectl_executable }}"
+                mode: '0755'
+
+            - name: Create Kind cluster
+              command: "{{ kind_executable }} create cluster --config kind-config.yaml"
+              args:
+                creates: "{{ lookup('env', 'HOME') }}/.kube/config"
+
+            - name: Install MetalLB
+              command: "{{ kubectl_executable }} apply -f https://raw.githubusercontent.com/metallb/metallb/v0.11.0/manifests/namespace.yaml"
+
+            - name: Create MetalLB memberlist secret
+              command: "{{ kubectl_executable }} create secret generic -n metallb-system memberlist --from-literal=secretkey=\"$(openssl rand -base64 128)\""
+              args:
+                warn: false
+
+            - name: Apply MetalLB manifest
+              command: "{{ kubectl_executable }} apply -f https://raw.githubusercontent.com/metallb/metallb/v0.11.0/manifests/metallb.yaml"
+
+            - name: Wait for MetalLB to be ready
+              command: "{{ kubectl_executable }} rollout status daemonset/speaker -n metallb-system"
+              changed_when: false
+
+            - name: Apply MetalLB configuration
+              command: "{{ kubectl_executable }} apply -f metallb-config.yaml"
+
+            - name: Apply StorageClass
+              command: "{{ kubectl_executable }} apply -f storageclass.yaml"
+
+            - name: Apply PersistentVolume
+              command: "{{ kubectl_executable }} apply -f pv.yaml"
+
+            - name: Deploy test application
+              command: "{{ kubectl_executable }} apply -f test-app.yaml"
+
+        - name: Tasks for deleting the cluster
+          tags: [delete, recreate]
+          block:
+            - name: Delete Kind cluster
+              command: "{{ kind_executable }} delete cluster --name {{ cluster_name }}"
